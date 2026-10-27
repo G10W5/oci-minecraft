@@ -44,6 +44,21 @@ jobs:
           printf '\n' >> "$HOME/.oci/oci_api_key.pem"
           chmod 600 "$HOME/.oci/oci_api_key.pem"
 
+      - name: Diagnose OCI credentials
+        env:
+          FP: ${{ secrets.OCI_FINGERPRINT }}
+        run: |
+          key="$HOME/.oci/oci_api_key.pem"
+          derived=$(openssl rsa -in "$key" -pubout -outform DER 2>/dev/null | openssl md5 -c | sed 's/.*= *//')
+          echo "fingerprint in the secret  : $FP"
+          echo "fingerprint of this key    : $derived"
+          if [ "$(printf '%s' "$FP" | tr 'A-F' 'a-f' | tr -d ' ')" = "$derived" ]; then
+            echo "::notice::Fingerprint matches the private key."
+          else
+            echo "::error::OCI_FINGERPRINT does not match OCI_PRIVATE_KEY_B64 (expected $derived)."
+            exit 1
+          fi
+
       - name: Write Terraform backend config
         env:
           OCI_BUCKET: ${{ secrets.OCI_BUCKET }}

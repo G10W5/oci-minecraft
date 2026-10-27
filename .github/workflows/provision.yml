@@ -79,6 +79,25 @@ jobs:
           head -n 1 "$HOME/.oci/oci_api_key.pem" | grep -q 'BEGIN' \
             || { echo "::error::OCI_PRIVATE_KEY_B64 is not a base64-encoded PEM private key"; exit 1; }
 
+      - name: Diagnose OCI credentials
+        env:
+          FP: ${{ secrets.OCI_FINGERPRINT }}
+          UID: ${{ secrets.OCI_USER_OCID }}
+        run: |
+          key="$HOME/.oci/oci_api_key.pem"
+          # OCI's fingerprint is the MD5 of the DER SubjectPublicKeyInfo,
+          # NOT the SSH-style MD5 that ssh-keygen prints.
+          derived=$(openssl rsa -in "$key" -pubout -outform DER 2>/dev/null | openssl md5 -c | sed 's/.*= *//')
+          echo "user OCID in the secret    : $UID"
+          echo "fingerprint in the secret  : $FP"
+          echo "fingerprint of this key    : $derived"
+          if [ "$(printf '%s' "$FP" | tr 'A-F' 'a-f' | tr -d ' ')" = "$derived" ]; then
+            echo "::notice::Fingerprint matches the private key."
+          else
+            echo "::error::OCI_FINGERPRINT does not match OCI_PRIVATE_KEY_B64. Copy the fingerprint from OCI Console -> My profile -> API keys (the value must equal $derived)."
+            exit 1
+          fi
+
       - name: Write Terraform backend config
         env:
           OCI_BUCKET: ${{ secrets.OCI_BUCKET }}
