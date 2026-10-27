@@ -1,0 +1,79 @@
+name: Destroy Minecraft server
+
+# Manual only, on purpose. Deleting the instance also deletes its boot volume,
+# which means the world is gone. Take a backup first: `mc backup` over SSH.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type destroy-minecraft to confirm
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-minecraft-provision
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
+  TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+  TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+  TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+  TF_VAR_private_key_path: ${{ runner.temp }}/oci_api_key.pem
+  OCI_REGION: eu-turin-1
+
+jobs:
+  destroy:
+    if: github.event.inputs.confirm == 'destroy-minecraft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCI API signing key
+        env:
+          OCI_PRIVATE_KEY_B64: ${{ secrets.OCI_PRIVATE_KEY_B64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          printf '%s' "$OCI_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/oci_api_key.pem"
+          printf '\n' >> "$RUNNER_TEMP/oci_api_key.pem"
+          chmod 600 "$RUNNER_TEMP/oci_api_key.pem"
+
+      - name: Write Terraform backend config
+        env:
+          OCI_BUCKET: ${{ secrets.OCI_BUCKET }}
+          OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+        run: |
+          cat > "$RUNNER_TEMP/backend.hcl" <<EOF
+          bucket = "${OCI_BUCKET}"
+          key    = "oci-minecraft/terraform.tfstate"
+          region = "${OCI_REGION}"
+          endpoints = {
+            s3 = "https://${OCI_NAMESPACE}.compat.objectstorage.${OCI_REGION}.oraclecloud.com"
+          }
+          skip_region_validation      = true
+          skip_credentials_validation = true
+          skip_requesting_account_id  = true
+          skip_metadata_api_check     = true
+          skip_s3_checksum            = true
+          use_path_style              = true
+          EOF
+          sed -i 's/^ *//' "$RUNNER_TEMP/backend.hcl"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+          terraform_wrapper: false
+
+      - name: terraform destroy
+        run: |
+          terraform -chdir=terraform init -input=false -backend-config="$RUNNER_TEMP/backend.hcl"
+          terraform -chdir=terraform destroy -auto-approve -input=false
+          echo "### Destroyed" >> "$GITHUB_STEP_SUMMARY"
+          echo "All OCI resources from this stack are gone." >> "$GITHUB_STEP_SUMMARY"

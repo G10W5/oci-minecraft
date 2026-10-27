@@ -1,0 +1,6 @@
+# Keep shell scripts and workflow files LF on every platform: CRLF in a
+# shebang script breaks on the Linux runner, and Actions chokes on CRLF YAML.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.key -text
+*.pem -text

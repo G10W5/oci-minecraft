@@ -1,0 +1,168 @@
+name: Provision Minecraft server
+
+# Fires every 6 hours, and on demand from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      mc_version:
+        description: Minecraft version for Fabric (first boot only)
+        required: true
+        default: "1.21.4"
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+# Never let two runs apply at once: that is how you end up with two instances
+# fighting over the same 2 OCPU allowance.
+concurrency:
+  group: oci-minecraft-provision
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  # S3-compatible backend credentials (never written to disk)
+  AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
+  # OCI provider credentials
+  TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+  TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+  TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+  TF_VAR_private_key_path: ${{ runner.temp }}/oci_api_key.pem
+  TF_VAR_mc_version: ${{ github.event.inputs.mc_version || '1.21.4' }}
+  OCI_REGION: eu-turin-1
+  MAX_RUNTIME: "19200"
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        env:
+          S_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          S_USER: ${{ secrets.OCI_USER_OCID }}
+          S_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          S_KEY: ${{ secrets.OCI_PRIVATE_KEY_B64 }}
+          S_BUCKET: ${{ secrets.OCI_BUCKET }}
+          S_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+          S_S3_ACCESS: ${{ secrets.OCI_S3_ACCESS_KEY }}
+          S_S3_SECRET: ${{ secrets.OCI_S3_SECRET_KEY }}
+        run: |
+          missing=""
+          [ -n "$S_TENANCY" ]     || missing="$missing OCI_TENANCY_OCID"
+          [ -n "$S_USER" ]        || missing="$missing OCI_USER_OCID"
+          [ -n "$S_FINGERPRINT" ] || missing="$missing OCI_FINGERPRINT"
+          [ -n "$S_KEY" ]         || missing="$missing OCI_PRIVATE_KEY_B64"
+          [ -n "$S_BUCKET" ]      || missing="$missing OCI_BUCKET"
+          [ -n "$S_NAMESPACE" ]   || missing="$missing OCI_NAMESPACE"
+          [ -n "$S_S3_ACCESS" ]   || missing="$missing OCI_S3_ACCESS_KEY"
+          [ -n "$S_S3_SECRET" ]   || missing="$missing OCI_S3_SECRET_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing - see SETUP.md"
+            exit 1
+          fi
+
+      - name: Install OCI API signing key
+        env:
+          OCI_PRIVATE_KEY_B64: ${{ secrets.OCI_PRIVATE_KEY_B64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          printf '%s' "$OCI_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/oci_api_key.pem"
+          printf '\n' >> "$RUNNER_TEMP/oci_api_key.pem"
+          chmod 600 "$RUNNER_TEMP/oci_api_key.pem"
+          head -n 1 "$RUNNER_TEMP/oci_api_key.pem" | grep -q 'BEGIN' \
+            || { echo "::error::OCI_PRIVATE_KEY_B64 is not a base64-encoded PEM private key"; exit 1; }
+
+      - name: Write Terraform backend config
+        env:
+          OCI_BUCKET: ${{ secrets.OCI_BUCKET }}
+          OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+        run: |
+          cat > "$RUNNER_TEMP/backend.hcl" <<EOF
+          bucket = "${OCI_BUCKET}"
+          key    = "oci-minecraft/terraform.tfstate"
+          region = "${OCI_REGION}"
+          endpoints = {
+            s3 = "https://${OCI_NAMESPACE}.compat.objectstorage.${OCI_REGION}.oraclecloud.com"
+          }
+          skip_region_validation      = true
+          skip_credentials_validation = true
+          skip_requesting_account_id  = true
+          skip_metadata_api_check     = true
+          skip_s3_checksum            = true
+          use_path_style              = true
+          EOF
+          sed -i 's/^ *//' "$RUNNER_TEMP/backend.hcl"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir=terraform init -input=false -backend-config="$RUNNER_TEMP/backend.hcl"
+
+      - name: Is it already provisioned?
+        id: check
+        run: |
+          ip=""
+          if terraform -chdir=terraform state list 2>/dev/null | grep -q '^oci_core_instance\.minecraft$'; then
+            ip=$(terraform -chdir=terraform output -raw public_ip 2>/dev/null || true)
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          if [ -n "$ip" ]; then
+            echo "Already provisioned at $ip - nothing to do."
+          fi
+
+      - name: Create network (once, never capacity-limited)
+        if: steps.check.outputs.ip == ''
+        run: |
+          terraform -chdir=terraform apply -auto-approve -input=false \
+            -target=oci_core_vcn.minecraft \
+            -target=oci_core_internet_gateway.minecraft \
+            -target=oci_core_default_route_table.minecraft \
+            -target=oci_core_default_security_list.minecraft \
+            -target=oci_core_subnet.minecraft
+
+      - name: Hunt for A1.Flex capacity
+        if: steps.check.outputs.ip == ''
+        run: bash scripts/provision-loop.sh
+
+      - name: Report result
+        id: result
+        run: |
+          ip=$(terraform -chdir=terraform output -raw public_ip 2>/dev/null || true)
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          {
+            echo "## OCI Minecraft server"
+            echo ""
+            if [ -n "$ip" ]; then
+              echo "**Status:** running"
+              echo ""
+              echo "| What | Value |"
+              echo "| --- | --- |"
+              echo "| Server address | \`$ip:25565\` |"
+              echo "| SSH | \`ssh -i ~/.ssh/oci-minecraft.key ubuntu@$ip\` |"
+              echo "| Instance | \`$(terraform -chdir=terraform output -raw instance_ocid)\` |"
+              echo "| AD | \`$(terraform -chdir=terraform output -raw availability_domain)\` |"
+            else
+              echo "**Status:** not provisioned yet - out of capacity, will retry on the next schedule."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Optional Discord notification
+        if: steps.result.outputs.ip != ''
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          IP: ${{ steps.result.outputs.ip }}
+        run: |
+          [ -z "$WEBHOOK" ] && exit 0
+          curl -fsS -H 'Content-Type: application/json' \
+            -d "{\"content\":\"Minecraft server is up: \`$IP:25565\` (ssh ubuntu@$IP)\"}" \
+            "$WEBHOOK" || true

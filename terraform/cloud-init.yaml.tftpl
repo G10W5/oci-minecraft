@@ -1,0 +1,36 @@
+#cloud-config
+# Runs once, on first boot, as root.
+preserve_hostname: false
+timezone: Europe/Rome
+package_update: true
+package_upgrade: false
+
+packages:
+  - openjdk-21-jre-headless
+  - curl
+  - jq
+  - rsync
+
+write_files:
+  - path: /etc/minecraft-bootstrap.env
+    owner: root:root
+    permissions: '0644'
+    content: |
+      MC_VERSION="${mc_version}"
+      MC_PORT="${mc_port}"
+      MC_XMS="${mc_xms}"
+      MC_XMX="${mc_xmx}"
+
+  # The installer is not fetched from the internet: it is base64-embedded here,
+  # so first boot works even if the repo is private or GitHub is unreachable.
+  # The same script lives at scripts/install-minecraft.sh for manual re-runs.
+  - path: /tmp/install-minecraft.sh
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: ${install_script}
+
+runcmd:
+  - [ bash, -lc, "bash /tmp/install-minecraft.sh > /var/log/minecraft-install.log 2>&1" ]
+
+final_message: "Minecraft bootstrap finished after $UPTIME seconds. See /var/log/minecraft-install.log"

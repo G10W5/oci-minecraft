@@ -1,0 +1,13 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+backend.hcl
+crash.log
+
+# Credentials - never commit these
+*.key
+*.pem
+.oci-key-b64.txt
+oci_api_key.pem
