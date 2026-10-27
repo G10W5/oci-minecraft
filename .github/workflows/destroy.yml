@@ -44,6 +44,25 @@ jobs:
           printf '\n' >> "$HOME/.oci/oci_api_key.pem"
           chmod 600 "$HOME/.oci/oci_api_key.pem"
 
+      - name: Sanitize OCI credentials
+        env:
+          RAW_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          RAW_USER: ${{ secrets.OCI_USER_OCID }}
+        run: |
+          t=$(printf '%s' "$RAW_TENANCY" | tr -d '[:space:]')
+          u=$(printf '%s' "$RAW_USER" | tr -d '[:space:]')
+          case "$t" in
+            ocid1.tenancy.oc1..*) ;;
+            *) echo "::error::OCI_TENANCY_OCID must start with ocid1.tenancy.oc1.. - got: $t"; exit 1 ;;
+          esac
+          case "$u" in
+            ocid1.user.oc1..*) ;;
+            ocid1.tenancy.oc1..*) echo "::error::OCI_USER_OCID holds a tenancy OCID. It must be your *user* OCID (ocid1.user.oc1..)."; exit 1 ;;
+            *) echo "::error::OCI_USER_OCID must start with ocid1.user.oc1.. - got: $u"; exit 1 ;;
+          esac
+          echo "TF_VAR_tenancy_ocid=$t" >> "$GITHUB_ENV"
+          echo "TF_VAR_user_ocid=$u" >> "$GITHUB_ENV"
+
       - name: Diagnose OCI credentials
         env:
           FP: ${{ secrets.OCI_FINGERPRINT }}
