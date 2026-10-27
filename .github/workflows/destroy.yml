@@ -24,7 +24,6 @@ env:
   TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
   TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
   TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
-  TF_VAR_private_key_path: ${{ runner.temp }}/oci_api_key.pem
   OCI_REGION: eu-turin-1
 
 jobs:
@@ -40,10 +39,10 @@ jobs:
         env:
           OCI_PRIVATE_KEY_B64: ${{ secrets.OCI_PRIVATE_KEY_B64 }}
         run: |
-          mkdir -p "$RUNNER_TEMP"
-          printf '%s' "$OCI_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/oci_api_key.pem"
-          printf '\n' >> "$RUNNER_TEMP/oci_api_key.pem"
-          chmod 600 "$RUNNER_TEMP/oci_api_key.pem"
+          mkdir -p "$HOME/.oci"
+          printf '%s' "$OCI_PRIVATE_KEY_B64" | tr -d '\r\n ' | base64 -d > "$HOME/.oci/oci_api_key.pem"
+          printf '\n' >> "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
 
       - name: Write Terraform backend config
         env:
