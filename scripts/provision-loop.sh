@@ -56,6 +56,11 @@ while :; do
       echo '```'
     } >> "$SUMMARY"
     echo "::error::Terraform failed for a reason that will not fix itself. Not retrying."
+    if grep -q '401-NotAuthenticated' <<<"$out"; then
+      echo "::error::OCI rejected the credentials (401). Check OCI_USER_OCID first: it must be exactly 76 characters and is safest copied from Cloud Shell with echo \$OCI_CS_USER_OCID. Then confirm the OCI_FINGERPRINT value is listed under My profile -> API keys."
+    elif grep -qiE 'LimitExceeded|QuotaExceeded' <<<"$out"; then
+      echo "::error::This looks like a service limit (Always Free allows 2 VCNs and 2 OCPUs). Delete leftover VCNs under Networking -> Virtual Cloud Networks and retry."
+    fi
     exit 1
   fi
 
