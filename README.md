@@ -44,9 +44,15 @@ which is what releases the storage quota.
    never killed mid-apply. Any other error fails loudly instead of hiding.
 4. On success, prints the IP in the job summary.
 
-State lives in an OCI Object Storage bucket (S3-compatible backend), so a fresh
-runner always knows what already exists. Without that, every run would try to
-create a second VCN.
+State lives in an OCI Object Storage bucket via Terraform's **native `oci`
+backend** (Terraform 1.12+), so a fresh runner always knows what already exists.
+Without that, every run would try to create a second VCN.
+
+The older S3-compatible backend cannot be used: OCI answers Terraform's state
+upload with `501 NotImplemented - AWS chunked encoding not supported`, and the
+apply fails *after* creating the resources, leaving them orphaned. The workflow
+includes a `probe/` module that writes a throwaway state object first, so that
+failure mode can never orphan infrastructure again.
 
 ## Files
 
@@ -55,6 +61,7 @@ terraform/          infrastructure
   compute.tf        the instance + image lookup
   network.tf        VCN, subnet, security list, route table
   cloud-init.yaml.tftpl
+probe/               1-resource module that proves the state backend is writable
 scripts/
   install-minecraft.sh   Fabric + Lithium + systemd (embedded in cloud-init, re-runnable)
   provision-loop.sh      the capacity retry loop

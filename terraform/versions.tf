@@ -10,7 +10,12 @@ terraform {
 
   # Partial configuration: the workflow supplies the rest with -backend-config,
   # so no bucket names or keys ever live in git.
-  backend "s3" {}
+  #
+  # The native OCI backend (Terraform 1.12+) is required here. The S3-compatible
+  # backend cannot upload state to OCI Object Storage: every PutObject carries
+  # "content-encoding: aws-chunked", which OCI rejects with
+  # 501 NotImplemented - "AWS chunked encoding not supported".
+  backend "oci" {}
 }
 
 provider "oci" {

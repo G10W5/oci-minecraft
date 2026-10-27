@@ -44,17 +44,21 @@ If `git` complains that a repo is not initialised, run `git init` first.
 
 ---
 
-## Step 3 - Create a Customer Secret Key (the bucket password)
+## Step 3 - (skipped) Customer Secret Key
 
-1. Top-right profile icon -> **My profile** -> **Customer secret keys**.
-2. **Generate secret key**. Name: `github-actions`.
-3. A dialog shows an **access key** and a **secret key**. The secret is shown
-   **once** - copy both somewhere safe now.
+You do **not** need this any more.
 
-| Value | Secret name |
-| --- | --- |
-| access key | `OCI_S3_ACCESS_KEY` |
-| secret key | `OCI_S3_SECRET_KEY` |
+Earlier versions of this project uploaded Terraform state through OCI's
+S3-compatible API, which required a Customer Secret Key. That route is a dead
+end: OCI rejects Terraform's state upload with
+
+```
+501 NotImplemented - AWS chunked encoding not supported
+```
+
+so both workflows now use Terraform's **native `oci` backend**, which signs
+state requests with the API key from Step 4. If you created a Customer Secret
+Key for this project, delete it: **My profile -> Customer secret keys**.
 
 ---
 
@@ -94,7 +98,7 @@ Delete the file when you are done: `Remove-Item .oci-key-b64.txt`
 
 ---
 
-## Step 6 - Add the eight repository secrets
+## Step 6 - Add the six repository secrets
 
 Repo -> **Settings** -> **Secrets and variables** -> **Actions** -> **New repository secret**.
 
@@ -106,9 +110,10 @@ Repo -> **Settings** -> **Secrets and variables** -> **Actions** -> **New reposi
 | `OCI_PRIVATE_KEY_B64` | Step 5 output |
 | `OCI_BUCKET` | `mc-terraform-state` (Step 2) |
 | `OCI_NAMESPACE` | Step 2 |
-| `OCI_S3_ACCESS_KEY` | Step 3 |
-| `OCI_S3_SECRET_KEY` | Step 3 |
 | `DISCORD_WEBHOOK` *(optional)* | any Discord channel webhook; leave out to skip |
+
+`OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY` are no longer used. If you already
+created them, deleting the secrets is safe.
 
 Names must match exactly. The workflow refuses to run and tells you which ones
 are missing.
@@ -128,6 +133,7 @@ What the run does, in order:
 | --- | --- |
 | Check required secrets | instant pass/fail |
 | terraform init | downloads the OCI provider, reads state from your bucket |
+| Prove the state backend is writable | writes a throwaway 1-resource state; fails in seconds if the bucket cannot be written |
 | Create network | ~1 minute, always succeeds |
 | Hunt for A1.Flex capacity | the long part - can run up to 5 h 20 m |
 | Report result | prints the IP, or says "no capacity this window" |
@@ -197,9 +203,15 @@ workflow can do.
 **Red X at "Check required secrets".**
 The message lists which names are missing or misspelled.
 
-**Red X at "terraform init" with `SignatureDoesNotMatch` / `InvalidAccessKeyId`.**
-`OCI_S3_ACCESS_KEY` / `OCI_S3_SECRET_KEY` are wrong or were copied with the
-"access key" swapped with the "secret key". Customer Secret Key, not API key.
+**Red X at "terraform init" with `401` / `NotAuthenticated`.**
+The API key is not recognised: `OCI_FINGERPRINT`, `OCI_USER_OCID` or
+`OCI_PRIVATE_KEY_B64` is wrong, or the key was never pressed **Add** in the
+console (downloading a key pair does not register it).
+
+**Red X at "Prove the state backend is writable".**
+`OCI_NAMESPACE` or `OCI_BUCKET` is wrong, or the API key lacks
+`OBJECT_CREATE`/`OBJECT_READ` on the bucket. The step exists precisely so this
+fails before any OCI resource is created.
 
 **Red X at init with `NoSuchBucket` or a DNS error.**
 `OCI_NAMESPACE` or `OCI_BUCKET` is wrong.

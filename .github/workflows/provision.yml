@@ -23,9 +23,6 @@ concurrency:
 env:
   TF_IN_AUTOMATION: "1"
   TF_INPUT: "0"
-  # S3-compatible backend credentials (never written to disk)
-  AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
   # OCI provider credentials
   TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
   TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
@@ -50,8 +47,6 @@ jobs:
           S_KEY: ${{ secrets.OCI_PRIVATE_KEY_B64 }}
           S_BUCKET: ${{ secrets.OCI_BUCKET }}
           S_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
-          S_S3_ACCESS: ${{ secrets.OCI_S3_ACCESS_KEY }}
-          S_S3_SECRET: ${{ secrets.OCI_S3_SECRET_KEY }}
         run: |
           missing=""
           [ -n "$S_TENANCY" ]     || missing="$missing OCI_TENANCY_OCID"
@@ -60,8 +55,6 @@ jobs:
           [ -n "$S_KEY" ]         || missing="$missing OCI_PRIVATE_KEY_B64"
           [ -n "$S_BUCKET" ]      || missing="$missing OCI_BUCKET"
           [ -n "$S_NAMESPACE" ]   || missing="$missing OCI_NAMESPACE"
-          [ -n "$S_S3_ACCESS" ]   || missing="$missing OCI_S3_ACCESS_KEY"
-          [ -n "$S_S3_SECRET" ]   || missing="$missing OCI_S3_SECRET_KEY"
           if [ -n "$missing" ]; then
             echo "::error::Missing repository secrets:$missing - see SETUP.md"
             exit 1
@@ -103,6 +96,9 @@ jobs:
           echo "user OCID   : $u (${#u} chars)"
           echo "TF_VAR_tenancy_ocid=$t" >> "$GITHUB_ENV"
           echo "TF_VAR_user_ocid=$u" >> "$GITHUB_ENV"
+          # The state backend reads these directly, so keep trimmed copies.
+          echo "CLEAN_TENANCY=$t" >> "$GITHUB_ENV"
+          echo "CLEAN_USER=$u" >> "$GITHUB_ENV"
 
       - name: Diagnose OCI credentials
         env:
@@ -127,22 +123,25 @@ jobs:
         env:
           OCI_BUCKET: ${{ secrets.OCI_BUCKET }}
           OCI_NAMESPACE: ${{ secrets.OCI_NAMESPACE }}
+          OCI_FP: ${{ secrets.OCI_FINGERPRINT }}
         run: |
+          # Terraform's native OCI backend (1.12+). It talks to Object Storage
+          # over the OCI API with the same API key the provider uses, so no
+          # S3-compatible credentials and no aws-chunked uploads are involved.
+          fp=$(printf '%s' "$OCI_FP" | tr -d '[:space:]')
           cat > "$RUNNER_TEMP/backend.hcl" <<EOF
-          bucket = "${OCI_BUCKET}"
-          key    = "oci-minecraft/terraform.tfstate"
-          region = "${OCI_REGION}"
-          endpoints = {
-            s3 = "https://${OCI_NAMESPACE}.compat.objectstorage.${OCI_REGION}.oraclecloud.com"
-          }
-          skip_region_validation      = true
-          skip_credentials_validation = true
-          skip_requesting_account_id  = true
-          skip_metadata_api_check     = true
-          skip_s3_checksum            = true
-          use_path_style              = true
+          bucket           = "${OCI_BUCKET}"
+          namespace        = "${OCI_NAMESPACE}"
+          key              = "oci-minecraft/terraform.tfstate"
+          region           = "${OCI_REGION}"
+          tenancy_ocid     = "${CLEAN_TENANCY}"
+          user_ocid        = "${CLEAN_USER}"
+          fingerprint      = "${fp}"
+          private_key_path = "${HOME}/.oci/oci_api_key.pem"
+          auth             = "APIKey"
           EOF
           sed -i 's/^ *//' "$RUNNER_TEMP/backend.hcl"
+          sed -i '/^$/d' "$RUNNER_TEMP/backend.hcl"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -151,6 +150,21 @@ jobs:
 
       - name: terraform init
         run: terraform -chdir=terraform init -input=false -backend-config="$RUNNER_TEMP/backend.hcl"
+
+      # Terraform only uploads state at the END of an apply. If the backend
+      # rejects that upload, every resource the apply just created is orphaned -
+      # exactly what the old S3 backend did. Prove a write works first.
+      - name: Prove the state backend is writable
+        run: |
+          terraform -chdir=probe init -input=false \
+            -backend-config="$RUNNER_TEMP/backend.hcl" \
+            -backend-config="key=oci-minecraft/state-probe.tfstate"
+          if ! out=$(terraform -chdir=probe apply -auto-approve -input=false -no-color 2>&1); then
+            printf '%s\n' "$out" | tail -n 40
+            echo "::error::Terraform cannot write to the state bucket. Refusing to create OCI resources that would then be orphaned."
+            exit 1
+          fi
+          echo "::notice::State backend is writable."
 
       - name: Is it already provisioned?
         id: check
